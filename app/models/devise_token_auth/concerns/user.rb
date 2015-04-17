@@ -2,17 +2,15 @@ module DeviseTokenAuth::Concerns::User
   extend ActiveSupport::Concern
 
   included do
-    # Hack to check if devise is already enabled
-    unless self.method_defined?(:devise_modules)
-      devise :database_authenticatable, :registerable,
-          :recoverable, :trackable, :validatable, :confirmable
-    else
-      self.devise_modules.delete(:omniauthable)
-    end
+    # Include default devise modules. Others available are:
+    # :confirmable, :lockable, :timeoutable and :omniauthable
+    devise :database_authenticatable, :registerable,
+          :recoverable, :rememberable, :trackable, :validatable,
+          :confirmable, :omniauthable
 
     serialize :tokens, JSON
 
-    validates :email, presence: true, email: true, if: Proc.new { |u| u.provider == 'email' }
+    validates_presence_of :email, if: Proc.new { |u| u.provider == 'email' }
     validates_presence_of :uid, if: Proc.new { |u| u.provider != 'email' }
 
     # only validate unique emails among email registration users
@@ -29,6 +27,7 @@ module DeviseTokenAuth::Concerns::User
     # get rid of dead tokens
     before_save :destroy_expired_tokens
 
+
     # don't use default devise email validation
     def email_required?
       false
@@ -37,6 +36,7 @@ module DeviseTokenAuth::Concerns::User
     def email_changed?
       false
     end
+
 
     # override devise method to include additional info as opts hash
     def send_confirmation_instructions(opts=nil)
@@ -99,39 +99,32 @@ module DeviseTokenAuth::Concerns::User
 
 
   def token_is_current?(token, client_id)
-    # ghetto HashWithIndifferentAccess
-    expiry     = self.tokens[client_id]['expiry'] || self.tokens[client_id][:expiry]
-    token_hash = self.tokens[client_id]['token'] || self.tokens[client_id][:token]
-
     return true if (
       # ensure that expiry and token are set
-      expiry and token and
+      self.tokens[client_id]['expiry'] and
+      self.tokens[client_id]['token'] and
 
       # ensure that the token has not yet expired
-      DateTime.strptime(expiry.to_s, '%s') > Time.now and
+      DateTime.strptime(self.tokens[client_id]['expiry'].to_s, '%s') > Time.now and
 
       # ensure that the token is valid
-      BCrypt::Password.new(token_hash) == token
+      BCrypt::Password.new(self.tokens[client_id]['token']) == token
     )
   end
 
 
   # allow batch requests to use the previous token
   def token_can_be_reused?(token, client_id)
-    # ghetto HashWithIndifferentAccess
-    updated_at = self.tokens[client_id]['updated_at'] || self.tokens[client_id][:updated_at]
-    last_token = self.tokens[client_id]['last_token'] || self.tokens[client_id][:last_token]
-
-
     return true if (
       # ensure that the last token and its creation time exist
-      updated_at and last_token and
+      self.tokens[client_id]['updated_at'] and
+      self.tokens[client_id]['last_token'] and
 
       # ensure that previous token falls within the batch buffer throttle time of the last request
-      Time.parse(updated_at) > Time.now - DeviseTokenAuth.batch_request_buffer_throttle and
+      Time.parse(self.tokens[client_id]['updated_at']) > Time.now - DeviseTokenAuth.batch_request_buffer_throttle and
 
       # ensure that the token is valid
-      BCrypt::Password.new(last_token) == token
+      BCrypt::Password.new(self.tokens[client_id]['last_token']) == token
     )
   end
 
@@ -166,13 +159,13 @@ module DeviseTokenAuth::Concerns::User
 
     # client may use expiry to prevent validation request if expired
     # must be cast as string or headers will break
-    expiry = self.tokens[client_id]['expiry'] || self.tokens[client_id][:expiry]
+    expiry = self.tokens[client_id]['expiry'].to_s
 
     return {
       "access-token" => token,
       "token-type"   => "Bearer",
       "client"       => client_id,
-      "expiry"       => expiry.to_s,
+      "expiry"       => expiry,
       "uid"          => self.uid
     }
   end
@@ -193,16 +186,6 @@ module DeviseTokenAuth::Concerns::User
     return build_auth_header(token, client_id)
   end
 
-  def confirmed?
-    self.devise_modules.exclude?(:confirmable) || super
-  end
-
-  def token_validation_response
-    self.as_json(except: [
-      :tokens, :created_at, :updated_at
-    ])
-  end
-
 
   protected
 
@@ -215,17 +198,17 @@ module DeviseTokenAuth::Concerns::User
     res = "#{uri.scheme}://#{uri.host}"
     res += ":#{uri.port}" if (uri.port and uri.port != 80 and uri.port != 443)
     res += "#{uri.path}" if uri.path
-    res += '#'
     res += "#{uri.fragment}" if uri.fragment
     res += "?#{params.to_query}"
 
     return res
   end
 
+
   # only validate unique email among users that registered by email
   def unique_email_user
     if provider == 'email' and self.class.where(provider: 'email', email: email).count > 0
-      errors.add(:email, :already_in_use, default: "This email address is already in use")
+      errors.add(:email, "This email address is already in use")
     end
   end
 
